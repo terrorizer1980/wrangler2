@@ -14,11 +14,32 @@ type EventContext<Env, P extends string, Data> = {
   data: Data;
 };
 
+type EventPluginContext<Env, P extends string, Data, PluginArgs> = {
+  request: Request;
+  functionPath: string;
+  waitUntil: (promise: Promise<unknown>) => void;
+  next: (input?: Request | string, init?: RequestInit) => Promise<Response>;
+  _next: (input?: Request | string, init?: RequestInit) => Promise<Response>;
+  env: Env & { ASSETS: { fetch: typeof fetch } };
+  params: Params<P>;
+  data: Data;
+  pluginArgs: PluginArgs;
+};
+
 declare type PagesFunction<
   Env = unknown,
   P extends string = string,
   Data extends Record<string, unknown> = Record<string, unknown>
 > = (context: EventContext<Env, P, Data>) => Response | Promise<Response>;
+
+declare type PagesPluginFunction<
+  Env = unknown,
+  P extends string = string,
+  Data extends Record<string, unknown> = Record<string, unknown>,
+  PluginArgs = unknown
+> = (
+  context: EventPluginContext<Env, P, Data, PluginArgs>
+) => Response | Promise<Response>;
 /* end @cloudflare/workers-types */
 
 type RouteHandler = {
@@ -30,8 +51,9 @@ type RouteHandler = {
 
 // inject `routes` via ESBuild
 declare const routes: RouteHandler[];
-// define `__FALLBACK_SERVICE__` via ESBuild
-declare const __FALLBACK_SERVICE__: string;
+// define `__PLUGIN_NAME__` and `__PLUGIN_ASSETS_DIRECTORY__` via ESBuild
+declare const __PLUGIN_NAME__: string;
+declare const __PLUGIN_ASSETS_DIRECTORY__: string;
 
 // expect an ASSETS fetcher binding pointing to the asset-server stage
 type FetchEnv = {
@@ -39,13 +61,11 @@ type FetchEnv = {
   ASSETS: { fetch: typeof fetch };
 };
 
-type WorkerContext = {
-  waitUntil: (promise: Promise<unknown>) => void;
-};
-
-function* executeRequest(request: Request, _env: FetchEnv) {
-  const requestPath = new URL(request.url).pathname;
-
+function* executeRequest(
+  request: Request,
+  _env: FetchEnv,
+  relativePathname: string
+) {
   // First, iterate through the routes (backwards) and execute "middlewares" on partial route matches
   for (const route of [...routes].reverse()) {
     if (route.method && route.method !== request.method) {
@@ -53,7 +73,7 @@ function* executeRequest(request: Request, _env: FetchEnv) {
     }
 
     const routeMatcher = match(route.routePath, { end: false });
-    const matchResult = routeMatcher(requestPath);
+    const matchResult = routeMatcher(relativePathname);
     if (matchResult) {
       for (const handler of route.middlewares.flat()) {
         yield {
@@ -72,7 +92,7 @@ function* executeRequest(request: Request, _env: FetchEnv) {
     }
 
     const routeMatcher = match(route.routePath, { end: true });
-    const matchResult = routeMatcher(requestPath);
+    const matchResult = routeMatcher(relativePathname);
     if (matchResult && route.modules.length) {
       for (const handler of route.modules.flat()) {
         yield {
@@ -86,11 +106,20 @@ function* executeRequest(request: Request, _env: FetchEnv) {
   }
 }
 
-export default {
-  async fetch(request: Request, env: FetchEnv, workerContext: WorkerContext) {
-    const handlerIterator = executeRequest(request, env);
-    const data = {}; // arbitrary data the user can set between functions
-    const next = async (input?: RequestInfo, init?: RequestInit) => {
+export const name = __PLUGIN_NAME__;
+export const assetsDirectory = __PLUGIN_ASSETS_DIRECTORY__;
+
+export default function (pluginArgs) {
+  const onRequest: PagesPluginFunction = async (workerContext) => {
+    let { request } = workerContext;
+    const { env, next, data } = workerContext;
+
+    const url = new URL(request.url);
+    const basePath = workerContext.functionPath;
+    const relativePathname = `/${url.pathname.split(basePath)[1]}`;
+
+    const handlerIterator = executeRequest(request, env, relativePathname);
+    const pluginNext = async (input?: RequestInfo, init?: RequestInit) => {
       if (input !== undefined) {
         request = new Request(input, init);
       }
@@ -100,11 +129,13 @@ export default {
       if (result.done == false) {
         const { handler, params, path } = result.value;
         const context = {
-          request: new Request(request.clone()),
-          functionPath: path,
-          next,
+          request,
+          functionPath: workerContext.functionPath + path,
+          next: pluginNext,
+          _next: next,
           params,
           data,
+          pluginArgs,
           env,
           waitUntil: workerContext.waitUntil.bind(workerContext),
         };
@@ -116,19 +147,19 @@ export default {
           [101, 204, 205, 304].includes(response.status) ? null : response.body,
           response
         );
-      } else if (__FALLBACK_SERVICE__) {
-        // There are no more handlers so finish with the fallback service (`env.ASSETS.fetch` in Pages' case)
-        return env[__FALLBACK_SERVICE__].fetch(request);
+      } else if (__PLUGIN_ASSETS_DIRECTORY__ !== undefined && "ASSETS" in env) {
+        request = new Request(
+          `http://fakehost/cdn-cgi/pages-plugins/${__PLUGIN_NAME__}${relativePathname}`,
+          request
+        );
+        return env.ASSETS.fetch(request);
       } else {
-        // There was not fallback service so actually make the request to the origin.
-        return fetch(request);
+        return next();
       }
     };
 
-    try {
-      return next();
-    } catch (err) {
-      return new Response("Internal Error", { status: 500 });
-    }
-  },
-};
+    return pluginNext();
+  };
+
+  return onRequest;
+}
