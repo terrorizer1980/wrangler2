@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout } from "node:timers/promises";
-import TOML from "@iarna/toml";
 import { findUp } from "find-up";
 import { render } from "ink";
 import React from "react";
@@ -27,6 +26,7 @@ import {
 } from "./kv";
 import { getPackageManager } from "./package-manager";
 import { pages } from "./pages";
+import { ParseError, printMessage, readFile } from "./parse";
 import publish from "./publish";
 import { getAssetPaths } from "./sites";
 import { createTail } from "./tail";
@@ -55,9 +55,8 @@ async function readConfig(configPath?: string): Promise<Config> {
   }
 
   if (configPath) {
-    const tml: string = await readFile(configPath, "utf-8");
-    const parsed = TOML.parse(tml) as Config;
-    Object.assign(config, parsed);
+    const toml = await readFile(configPath, "toml");
+    Object.assign(config, toml);
   }
 
   normaliseAndValidateEnvironmentsConfig(config);
@@ -247,9 +246,7 @@ export async function main(argv: string[]): Promise<void> {
       } else {
         // If package.json exists and wrangler isn't installed,
         // then ask to add wrangler to devDependencies
-        const packageJson = JSON.parse(
-          await readFile(pathToPackageJson, "utf-8")
-        );
+        const packageJson = await readFile(pathToPackageJson, "json");
         if (
           !(
             packageJson.devDependencies?.wrangler ||
@@ -308,9 +305,7 @@ export async function main(argv: string[]): Promise<void> {
         isTypescriptProject = true;
         // If there's a tsconfig, check if @cloudflare/workers-types
         // is already installed, and offer to install it if not
-        const packageJson = JSON.parse(
-          await readFile(pathToPackageJson, "utf-8")
-        );
+        const packageJson = await readFile(pathToPackageJson, "json");
         if (
           !(
             packageJson.devDependencies?.["@cloudflare/workers-types"] ||
@@ -342,10 +337,7 @@ export async function main(argv: string[]): Promise<void> {
             await mkdir("./src", { recursive: true });
             await writeFile(
               "./src/index.ts",
-              await readFile(
-                path.join(__dirname, "../templates/new-worker.ts"),
-                "utf-8"
-              )
+              await readFile(path.join(__dirname, "../templates/new-worker.ts"))
             );
             console.log(`✨ Created src/index.ts`);
           }
@@ -359,10 +351,7 @@ export async function main(argv: string[]): Promise<void> {
             await mkdir("./src", { recursive: true });
             await writeFile(
               path.join("./src/index.js"),
-              await readFile(
-                path.join(__dirname, "../templates/new-worker.js"),
-                "utf-8"
-              )
+              await readFile(path.join(__dirname, "../templates/new-worker.js"))
             );
             console.log(`✨ Created src/index.js`);
           }
@@ -1617,7 +1606,7 @@ export async function main(argv: string[]): Promise<void> {
             const namespaceId = getNamespaceId(args);
             // One of `args.path` and `args.value` must be defined
             const value = args.path
-              ? await readFile(args.path, "utf-8")
+              ? await readFile(args.path)
               : // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                 args.value!;
             const config = args.config as Config;
@@ -1926,15 +1915,7 @@ export async function main(argv: string[]): Promise<void> {
 
             const namespaceId = getNamespaceId(args);
             const config = args.config as Config;
-            const content = await readFile(filename, "utf-8");
-            let parsedContent;
-            try {
-              parsedContent = JSON.parse(content);
-            } catch (err) {
-              throw new Error(
-                `Could not parse json from ${filename}.\n${err.message ?? err}`
-              );
-            }
+            const content = await readFile(filename, "json");
 
             if (args.local) {
               const { Miniflare } = await import("miniflare");
@@ -1949,7 +1930,7 @@ export async function main(argv: string[]): Promise<void> {
                 value,
                 expiration,
                 expiration_ttl,
-              } of parsedContent) {
+              } of content) {
                 await ns.put(key, value, {
                   expiration,
                   expirationTtl: expiration_ttl,
@@ -2009,15 +1990,7 @@ export async function main(argv: string[]): Promise<void> {
           async ({ filename, ...args }) => {
             const namespaceId = getNamespaceId(args);
             const config = args.config as Config;
-            const content = await readFile(filename, "utf-8");
-            let parsedContent;
-            try {
-              parsedContent = JSON.parse(content);
-            } catch (err) {
-              throw new Error(
-                `Could not parse json from ${filename}.\n${err.message ?? err}`
-              );
-            }
+            const content = await readFile(filename, "json");
 
             if (args.local) {
               const { Miniflare } = await import("miniflare");
@@ -2027,7 +2000,7 @@ export async function main(argv: string[]): Promise<void> {
                 script: ` `, // has to be a string with at least one char
               });
               const ns = await mf.getKVNamespace(namespaceId);
-              for (const key of parsedContent) {
+              for (const key of content) {
                 await ns.delete(key);
               }
             } else {
@@ -2092,6 +2065,11 @@ export async function main(argv: string[]): Promise<void> {
       wrangler.showHelp("error");
       console.error(""); // Just adds a bit of space
       console.error(e.message);
+    } else if (e instanceof ParseError) {
+      e.detail.notes?.push({
+        text: "\nIf you think this is a bug, please open an issue at: https://github.com/cloudflare/wrangler2/issues/new",
+      });
+      printMessage(e.detail);
     } else {
       console.error(e.message);
       console.error(""); // Just adds a bit of space
