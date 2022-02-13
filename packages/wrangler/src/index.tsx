@@ -104,7 +104,7 @@ ${TOML.stringify({
 
   if (configPath && "wasm_modules" in config) {
     // rewrite wasm_module paths to be absolute
-    const modules = {};
+    const modules: Record<string, string> = {};
     for (const [name, filePath] of Object.entries(config.wasm_modules || {})) {
       modules[name] = path.relative(
         process.cwd(),
@@ -325,7 +325,7 @@ export async function main(argv: string[]): Promise<void> {
           // TODO: suggest next steps?
         } catch (err) {
           throw new Error(
-            `Failed to create wrangler.toml.\n${err.message ?? err}`
+            `Failed to create wrangler.toml.\n${(err as Error).message ?? err}`
           );
         }
       }
@@ -1350,6 +1350,7 @@ export async function main(argv: string[]): Promise<void> {
             try {
               await submitSecret();
             } catch (e) {
+              // @ts-expect-error non-standard property on Error
               if (e.code === 10007) {
                 // upload a draft worker
                 await fetchResult(
@@ -1701,7 +1702,8 @@ export async function main(argv: string[]): Promise<void> {
                 id = getNamespaceId(args, config);
               } catch (e) {
                 throw new CommandLineArgsError(
-                  "Not able to delete namespace.\n" + e.message
+                  "Not able to delete namespace.\n" +
+                    ((e as Error).message ?? e)
                 );
               }
 
@@ -2117,7 +2119,9 @@ export async function main(argv: string[]): Promise<void> {
               parsedContent = JSON.parse(content);
             } catch (err) {
               throw new Error(
-                `Could not parse json from ${filename}.\n${err.message ?? err}`
+                `Could not parse json from ${filename}.\n${
+                  (err as Error).message ?? err
+                }`
               );
             }
 
@@ -2201,7 +2205,9 @@ export async function main(argv: string[]): Promise<void> {
               parsedContent = JSON.parse(content);
             } catch (err) {
               throw new Error(
-                `Could not parse json from ${filename}.\n${err.message ?? err}`
+                `Could not parse json from ${filename}.\n${
+                  (err as Error).message ?? err
+                }`
               );
             }
 
@@ -2408,7 +2414,7 @@ export async function main(argv: string[]): Promise<void> {
       console.error(""); // Just adds a bit of space
       console.error(e.message);
     } else {
-      console.error(e.message);
+      console.error(e instanceof Error ? e.message : e);
       console.error(""); // Just adds a bit of space
       console.error(
         `${fgGreenColor}%s${resetColor}`,
